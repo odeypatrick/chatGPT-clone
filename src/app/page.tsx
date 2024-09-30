@@ -13,7 +13,6 @@ export default function Home() {
   const [selectedbranchId, setSelectedbranchId] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
 
-
   const toggleModal = () => setShowModal(!showModal);
   const toggleComponentVisibility = () => {
     setIsComponentVisible(!isComponentVisible);

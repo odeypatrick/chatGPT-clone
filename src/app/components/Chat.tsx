@@ -20,7 +20,9 @@ const Chat = (props: any) => {
   const [errorMessage, setErrorMessage] = useState("");
   const [showEmptyChat, setShowEmptyChat] = useState(true);
   const [conversation, setConversation] = useState<MessageType[]>([]);
+  const [initialConversation, setInitialConversation] = useState<MessageType[]>([]);
   const [message, setMessage] = useState("");
+  const [threadLevel, setThreadLevel] = useState(0)
   const bottomOfChatRef = useRef<HTMLDivElement>(null);
   const textAreaRef = useAutoResizeTextArea();
 
@@ -45,17 +47,26 @@ const Chat = (props: any) => {
             
             const validMessages = messages.map(message => ({
                 id: message.id,
-                content: message.content,
-                role: message.role as "user" | "system", 
+                branches: message.branches
             }));
 
             setConversation(validMessages);
+            setInitialConversation(validMessages)
             setShowEmptyChat(validMessages.length === 0);
         }
     };
 
     fetchMessages();
 }, [selectedConversationId]);
+
+// useEffect(() => {
+//   const filteredConversations = conversation.filter(msg => msg.branches.length == threadLevel + 1)
+//   if(filteredConversations.length > 0) {
+//     setConversation(filteredConversations);
+//   } else {
+//     setConversation(initialConversation);
+//   }
+// }, [threadLevel])
 
   const sendMessageToAPI = async (e: any) => {
     e.preventDefault();
@@ -83,25 +94,34 @@ const Chat = (props: any) => {
     // Adjust the message type to match MessageType interface
     const userMessage: MessageType = {
       id: sentMsg[0].id, 
-      content: message,
-      role: "user",
+      content: message
     };
     
     const systemMessage: MessageType = {
       id: Math.random() * 1000, 
-      content: null,
-      role: "system",
+      content: null
     };
   
     setConversation(prev => [
       ...prev,
-      userMessage,
-      systemMessage,
+      {
+        id: userMessage.id,
+        branches: [
+          {
+            id: userMessage.id,
+            content: userMessage.content,
+            threadlevel: threadLevel,
+            response: {
+              id: systemMessage.id,
+              content: systemMessage.content
+            }
+          }
+        ]
+      }
     ]);
   
     setMessage("");
     setShowEmptyChat(false);
-  
     setTimeout(async () => {
       const simulatedResponse = generateAIResponse();
   
@@ -112,7 +132,20 @@ const Chat = (props: any) => {
   
         return [
           ...updatedConversation,
-          { content: simulatedResponse, role: "system", id: Math.random() } // Adding the ID here as well
+          {
+            id: userMessage.id,
+            branches: [
+              {
+                id: userMessage.id,
+                content: userMessage.content,
+                threadlevel: threadLevel,
+                response: {
+                  id: systemMessage.id,
+                  content: simulatedResponse
+                }
+              }
+            ]
+          }
         ];
       });
   
@@ -159,6 +192,9 @@ const Chat = (props: any) => {
                     message={msg} 
                     conversationId={selectedConversationId} 
                     setConversation={setConversation}
+                    conversation={conversation}
+                    threadLevel={threadLevel}
+                    setThreadLevel={setThreadLevel}
                     setShowModal={setShowModal}
                     setSelectedbranchId={setSelectedbranchId}
                     />

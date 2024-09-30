@@ -24,7 +24,7 @@ export const sendMessage = async (
       conversation_id: conversationId,
       content,
       is_branch: isBranch,
-      original_prompt_id: originalPromptId
+      parent_id: originalPromptId
     }])
     .select();
 
@@ -37,7 +37,7 @@ export const saveResponse = async (messageId: number, responseText: string) => {
     const { data, error } = await supabase
       .from('responses')
       .insert([
-        { message_id: messageId, response_text: responseText }
+        { message_id: messageId, content: responseText }
       ])
       .select('id, created_at'); // Optionally select the returned fields
 
@@ -56,7 +56,8 @@ export const saveResponse = async (messageId: number, responseText: string) => {
 export const editMessage = async (
   conversationId: number,
   originalMessageId: number,
-  newContent: string
+  newContent: string,
+  threadLevel: number
 ) => {
   const { data, error } = await supabase
     .from('messages')
@@ -64,7 +65,8 @@ export const editMessage = async (
       conversation_id: conversationId,
       content: newContent,
       is_branch: true,
-      original_prompt_id: originalMessageId
+      parent_id: originalMessageId,
+      thread_level: threadLevel
     }])
     .select();
 
@@ -83,38 +85,125 @@ export const fetchConversations = async () => {
   return conversations;
 };
 
-// Function to fetch all messages and their corresponding responses in a conversation
-export const fetchMessagesInConversation = async (conversationId: string) => {
+// export const fetchMessagesInConversation = async (conversationId: string) => {
+//   // Fetch all user messages in the conversation
+//   const { data: messages, error: messageError } = await supabase
+//     .from('messages')
+//     .select('*')
+//     .eq('conversation_id', conversationId)
+//     .order('created_at', { ascending: true });
+
+//   if (messageError) throw new Error(`Error fetching messages: ${messageError.message}`);
+
+//   // For each message, fetch the corresponding response and branch count
+//   const messagePairs = await Promise.all(
+//     messages.map(async (message) => {
+//       // Fetch the response associated with this message
+//       const { data: response, error: responseError } = await supabase
+//         .from('responses')
+//         .select('*')
+//         .eq('message_id', message.id)
+//         .single();
+
+//       if (responseError) throw new Error(`Error fetching response for message ${message.id}: ${responseError.message}`);
+
+//       return [
+//         {
+//           id: message.id,
+//           content: message.content,
+//           parent_id: message.parent_id,
+//           role: 'user'
+//         },
+//         {
+//           id: response?.id,
+//           content: response ? response.content : null,
+//           role: 'system',
+//         },
+//       ].filter(entry => entry.content !== null);  // Remove null entries if no response
+//     })
+//   );
+
+//   return messagePairs.flat();
+// };
+
+export const fetchMessagesInConversation = async (conversationId: number) => {
   // Fetch all user messages in the conversation
   const { data: messages, error: messageError } = await supabase
     .from('messages')
     .select('*')
     .eq('conversation_id', conversationId)
+    .eq('is_branch', false)
     .order('created_at', { ascending: true });
 
   if (messageError) throw new Error(`Error fetching messages: ${messageError.message}`);
 
-  // For each message, fetch the corresponding response from the Responses table
-  const messagePairs = await Promise.all(
+  // Create a map to store the original messages and branches
+  const messageMap = {};
+
+  // For each message, fetch its response and branches
+  await Promise.all(
     messages.map(async (message) => {
+      // Fetch the response for the message
       const { data: response, error: responseError } = await supabase
         .from('responses')
-        .select('*')
+        .select('id, content')
         .eq('message_id', message.id)
         .single();
 
-      if (responseError) throw new Error(`Error fetching response for message ${message.id}: ${responseError.message}`);
+      if (responseError && responseError.code !== 'PGRST116') {
+        // Ignore if no response (PGRST116 = No rows returned), throw other errors
+        throw new Error(`Error fetching response for message ${message.id}: ${responseError.message}`);
+      }
 
-      return [
-        { id: message.id, content: message.content, role: 'user' },
-        { id: response.id, content: response ? response.response_text : null, role: 'system' }
-      ].filter(entry => entry.content !== null);  // Remove null entries if no response
+      // Fetch branches (children) of this message
+      const { data: branches, error: branchError } = await supabase
+        .from('messages')
+        .select('id, content')
+        .eq('parent_id', message.id);
+
+      if (branchError) throw new Error(`Error fetching branches for message ${message.id}: ${branchError.message}`);
+
+      // Add the original message to the message map
+      messageMap[message.id] = {
+        id: message.id,
+        branches: [
+          {
+            id: message.id,
+            content: message.content,
+            threadLevel: 0, // Original message
+            response: response ? { id: response.id, content: response.content } : null,
+          },
+        ],
+      };
+
+      // Add any branches (children) to the message map with threadLevel 1 and fetch their responses
+      await Promise.all(
+        branches.map(async (branch) => {
+          const { data: branchResponse, error: branchResponseError } = await supabase
+            .from('responses')
+            .select('id, content')
+            .eq('message_id', branch.id)
+            .single();
+
+          if (branchResponseError && branchResponseError.code !== 'PGRST116') {
+            throw new Error(`Error fetching response for branch ${branch.id}: ${branchResponseError.message}`);
+          }
+
+          messageMap[message.id].branches.push({
+            id: branch.id,
+            content: branch.content,
+            threadLevel: 1, // This is a branch message
+            response: branchResponse ? { id: branchResponse.id, content: branchResponse.content } : null,
+          });
+        })
+      );
     })
   );
 
-  console.log(messages.flat())
+  // Convert the messageMap to an array of grouped original messages with branches
+  const result = Object.values(messageMap);
 
-  return messagePairs.flat();
+  return result;
 };
 
 export const clearAllConversations = async () => {
@@ -157,17 +246,30 @@ export const clearAllConversations = async () => {
   }
 };
 
-// Function to fetch all messages that are branches of a specific prompt
-export const fetchBranchedMessages = async (originalPromptId: number) => {
+export const fetchBranchedMessages = async (originalPromptId: string) => {
+  // Fetch the parent message (original prompt)
+  const { data: parentMessage, error: parentError } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('id', originalPromptId)
+    .single();
+
+  if (parentError) throw new Error(`Error fetching parent message: ${parentError.message}`);
+
+  // Fetch all branched messages
   const { data: branchedMessages, error: branchError } = await supabase
     .from('messages')
     .select('*')
     .eq('is_branch', true)
-    .eq('original_prompt_id', originalPromptId)
+    .eq('parent_id', originalPromptId)
     .order('created_at', { ascending: true });
 
   if (branchError) throw new Error(`Error fetching branched messages: ${branchError.message}`);
 
+  // Create an array for the parent message
+  const parentMessageEntry = [{ id: parentMessage.id, content: parentMessage.content, role: 'user' }];
+
+  // Fetch responses for branched messages
   const branchedMessagePairs = await Promise.all(
     branchedMessages.map(async (message) => {
       const { data: response, error: responseError } = await supabase
@@ -180,10 +282,11 @@ export const fetchBranchedMessages = async (originalPromptId: number) => {
 
       return [
         { id: message.id, content: message.content, role: 'user' },
-        { id: response?.id, content: response ? response.response_text : null, role: 'system' }
-      ].filter(entry => entry.content !== null); 
+        { id: response?.id, content: response ? response.content : null, role: 'system' }
+      ].filter(entry => entry.content !== null);
     })
   );
 
-  return branchedMessagePairs.flat();
+  // Return the parent message first, followed by the branched messages
+  return [...parentMessageEntry, ...branchedMessagePairs.flat()];
 };
